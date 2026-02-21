@@ -128,8 +128,8 @@ async def upload_file(client: Client, chat_id: int, file_path: str, mime: str,
             pass
         last_edit[0] = now
 
+    # NOTE: do NOT put chat_id in kwargs — it would clash with the positional arg
     kwargs = dict(
-        chat_id=chat_id,
         caption=caption,
         parse_mode=None,
         progress=_progress,
@@ -138,11 +138,11 @@ async def upload_file(client: Client, chat_id: int, file_path: str, mime: str,
         kwargs["thumb"] = thumb
 
     if mime and mime.startswith("video/"):
-        await client.send_video(file_path, **kwargs)
+        await client.send_video(chat_id, file_path, **kwargs)
     elif mime and mime.startswith("audio/"):
-        await client.send_audio(file_path, **kwargs)
+        await client.send_audio(chat_id, file_path, **kwargs)
     elif mime and mime.startswith("image/"):
-        await client.send_photo(chat_id=chat_id, photo=file_path,
-                                 caption=caption, progress=_progress)
+        await client.send_photo(chat_id, file_path,
+                                caption=caption, progress=_progress)
     else:
-        await client.send_document(file_path, **kwargs)
+        await client.send_document(chat_id, file_path, **kwargs)
