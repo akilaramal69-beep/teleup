@@ -181,6 +181,7 @@ async def upload_file(
     thumb_file_id: str | None,
     progress_msg,
     start_time_ref: list,
+    force_document: bool = False,
 ):
     """
     Upload a local file to Telegram with:
@@ -215,7 +216,9 @@ async def upload_file(
         last_edit[0] = now
 
     os.makedirs(Config.DOWNLOAD_LOCATION, exist_ok=True)
-    is_video = mime and mime.startswith("video/")
+    is_video = not force_document and bool(mime and mime.startswith("video/"))
+    is_audio = not force_document and bool(mime and mime.startswith("audio/"))
+    is_image = not force_document and bool(mime and mime.startswith("image/"))
 
     # ── 1. Get video metadata (duration, width, height) ───────────────────────
     meta = {"duration": 0, "width": 0, "height": 0}
@@ -247,7 +250,6 @@ async def upload_file(
         except Exception:
             pass
         thumb_local = await generate_video_thumbnail(file_path, chat_id, meta["duration"])
-        auto_thumb = True
 
     # ── 3. Build kwargs (chat_id and file passed as positional args) ───────────
     kwargs = dict(
@@ -260,19 +262,21 @@ async def upload_file(
 
     # ── 4. Send to Telegram ───────────────────────────────────────────────────
     try:
-        if is_video:
+        if force_document:
+            await client.send_document(chat_id, file_path, **kwargs)
+        elif is_video:
             await client.send_video(
                 chat_id,
                 file_path,
                 duration=meta["duration"],
                 width=meta["width"],
                 height=meta["height"],
-                supports_streaming=True,   # marks the video as streamable
+                supports_streaming=True,
                 **kwargs,
             )
-        elif mime and mime.startswith("audio/"):
+        elif is_audio:
             await client.send_audio(chat_id, file_path, **kwargs)
-        elif mime and mime.startswith("image/"):
+        elif is_image:
             await client.send_photo(chat_id, file_path,
                                     caption=caption, progress=_progress)
         else:
