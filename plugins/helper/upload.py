@@ -101,8 +101,11 @@ async def download_url(url: str, filename: str, progress_msg, start_time_ref: li
 
 
 async def upload_file(client: Client, chat_id: int, file_path: str, mime: str,
-                      caption: str, thumb: str | None, progress_msg, start_time_ref: list):
-    """Upload a local file to Telegram with live progress."""
+                      caption: str, thumb_file_id: str | None, progress_msg, start_time_ref: list):
+    """Upload a local file to Telegram with live progress.
+    thumb_file_id: a Telegram file_id string stored in the DB (permanent). We download it
+    to a temp path before uploading so Pyrogram can attach it as thumb, then clean up.
+    """
 
     last_edit = [time.time()]
     start_time_ref[0] = time.time()
@@ -128,21 +131,42 @@ async def upload_file(client: Client, chat_id: int, file_path: str, mime: str,
             pass
         last_edit[0] = now
 
-    # NOTE: do NOT put chat_id in kwargs — it would clash with the positional arg
+    # ── Download thumbnail from Telegram if a file_id is set ──────────────────
+    thumb_local = None
+    if thumb_file_id:
+        try:
+            os.makedirs(Config.DOWNLOAD_LOCATION, exist_ok=True)
+            thumb_local = await client.download_media(
+                thumb_file_id,
+                file_name=os.path.join(Config.DOWNLOAD_LOCATION, f"thumb_{chat_id}.jpg"),
+            )
+        except Exception:
+            thumb_local = None  # silently skip if thumb download fails
+
+    # ── Build shared kwargs (no chat_id — passed as positional arg) ───────────
     kwargs = dict(
         caption=caption,
         parse_mode=None,
         progress=_progress,
     )
-    if thumb:
-        kwargs["thumb"] = thumb
+    if thumb_local:
+        kwargs["thumb"] = thumb_local
 
-    if mime and mime.startswith("video/"):
-        await client.send_video(chat_id, file_path, **kwargs)
-    elif mime and mime.startswith("audio/"):
-        await client.send_audio(chat_id, file_path, **kwargs)
-    elif mime and mime.startswith("image/"):
-        await client.send_photo(chat_id, file_path,
-                                caption=caption, progress=_progress)
-    else:
-        await client.send_document(chat_id, file_path, **kwargs)
+    try:
+        if mime and mime.startswith("video/"):
+            await client.send_video(chat_id, file_path, **kwargs)
+        elif mime and mime.startswith("audio/"):
+            await client.send_audio(chat_id, file_path, **kwargs)
+        elif mime and mime.startswith("image/"):
+            await client.send_photo(chat_id, file_path,
+                                    caption=caption, progress=_progress)
+        else:
+            await client.send_document(chat_id, file_path, **kwargs)
+    finally:
+        # Always clean up the temporarily downloaded thumbnail
+        if thumb_local and os.path.exists(thumb_local):
+            try:
+                os.remove(thumb_local)
+            except Exception:
+                pass
+
