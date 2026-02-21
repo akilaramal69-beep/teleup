@@ -30,6 +30,9 @@ if __name__ == "__main__":
         api_hash=Config.API_HASH,
         plugins=plugins,
         sleep_threshold=300,
+        workers=8,                      # more concurrent handler coroutines
+        upload_boost=True,              # pyroblack: parallel MTProto upload connections
+        max_concurrent_transmissions=5, # pyroblack: 5 parallel chunk streams
     )
 
     print("🎊 BOT IS ALIVE 🎊")
