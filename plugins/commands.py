@@ -90,10 +90,7 @@ async def do_upload(client: Client, message: Message, url: str, filename: str):
         custom_caption = user_data.get("caption") or ""
         thumb_file_id = user_data.get("thumb") or None   # stored as Telegram file_id
 
-        caption = (
-            custom_caption
-            or f"📁 **{os.path.basename(file_path)}**\n💾 {humanbytes(file_size)}"
-        )
+        caption = custom_caption or os.path.basename(file_path)
 
         await status_msg.edit_text("📤 Uploading to Telegram…")
         await upload_file(
