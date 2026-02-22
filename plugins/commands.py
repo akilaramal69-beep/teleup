@@ -100,21 +100,30 @@ _STD_QUALITIES = [("360p", 360), ("480p", 480), ("720p 📺", 720), ("1080p ⭐"
 
 def quality_keyboard_from_heights(user_id: int, heights: list) -> InlineKeyboardMarkup:
     """
-    Build the quality selector keyboard from the video's real available heights.
-    Always includes '\U0001f3c6 Best' and '\U0001f3a7 MP3'. Shows a standard height
-    button only if that height is <= the video's maximum available height.
+    Build quality selector from the video's real available heights.
+    - If heights is non-empty: video platform → show height buttons + Best + MP3.
+    - If heights is empty: audio-only platform → show Best Audio + MP3 only.
     """
     max_h = max(heights) if heights else 0
-    buttons = [
-        InlineKeyboardButton(label, callback_data=f"quality:{user_id}:{h}p")
-        for label, h in _STD_QUALITIES
-        if max_h >= h
-    ]
-    buttons += [
-        InlineKeyboardButton("🏆 Best", callback_data=f"quality:{user_id}:best"),
-        InlineKeyboardButton("🎧 MP3",  callback_data=f"quality:{user_id}:mp3"),
-    ]
-    # Lay out in rows of 3
+
+    if max_h > 0:
+        # Video platform: show applicable height buttons
+        buttons = [
+            InlineKeyboardButton(label, callback_data=f"quality:{user_id}:{h}p")
+            for label, h in _STD_QUALITIES
+            if max_h >= h
+        ]
+        buttons += [
+            InlineKeyboardButton("🏆 Best",  callback_data=f"quality:{user_id}:best"),
+            InlineKeyboardButton("🎧 MP3",   callback_data=f"quality:{user_id}:mp3"),
+        ]
+    else:
+        # Audio-only platform (SoundCloud, Bandcamp, Mixcloud, etc.)
+        buttons = [
+            InlineKeyboardButton("🎧 Best Audio", callback_data=f"quality:{user_id}:audio"),
+            InlineKeyboardButton("🎧 MP3 (192k)", callback_data=f"quality:{user_id}:mp3"),
+        ]
+
     rows = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
     return InlineKeyboardMarkup(rows)
 
@@ -130,12 +139,19 @@ def mode_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
 async def ask_quality(target_msg: Message, user_id: int, filename: str,
                       heights: list):
-    """Show the quality selector using only the video's real available heights."""
-    top = f"Available: {', '.join(str(h)+'p' for h in heights)}" if heights else "Fetching failed¹"
+    """Show the quality/format selector, adapting to audio-only vs video sources."""
+    has_video = bool(heights)
+    if has_video:
+        avail = ", ".join(str(h) + "p" for h in heights if h >= 240)
+        subtitle = "📺 Select **video quality** or **🎧 MP3** for audio only:"
+        top = f"📊 Available: {avail}" if avail else ""
+    else:
+        subtitle = "🎧 Select **audio format** (audio-only source):"
+        top = "📳 Audio-only source — no video streams detected"
     text = (
         f"📁 **File:** `{filename}`\n"
-        f"📊 {top}\n\n"
-        "📺 Select **video quality** or choose **🎧 MP3** for audio only:"
+        + (f"{top}\n" if top else "")
+        + f"\n{subtitle}"
     )
     kb = quality_keyboard_from_heights(user_id, heights)
     try:
@@ -354,7 +370,7 @@ async def mode_cb(client: Client, callback_query: CallbackQuery):
     )
 
 
-@Client.on_callback_query(filters.regex(r"^quality:(\d+):(360p|480p|720p|1080p|best|mp3)$"))
+@Client.on_callback_query(filters.regex(r"^quality:(\d+):(360p|480p|720p|1080p|best|mp3|audio)$"))
 async def quality_cb(client: Client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     parts = callback_query.data.split(":")
@@ -370,14 +386,17 @@ async def quality_cb(client: Client, callback_query: CallbackQuery):
 
     await callback_query.answer()
 
-    # For MP3, force .mp3 extension on the output filename
+    # Adjust filename extension for audio-only downloads
     filename = pending["filename"]
     if quality == "mp3":
         filename = os.path.splitext(filename)[0] + ".mp3"
+    elif quality == "audio":
+        filename = os.path.splitext(filename)[0] + ".m4a"
 
     label_map = {
         "360p": "360p", "480p": "480p", "720p": "720p 📺",
-        "1080p": "1080p ⭐", "best": "🏆 Best Quality", "mp3": "🎧 MP3",
+        "1080p": "1080p ⭐", "best": "🏆 Best Quality",
+        "mp3": "🎧 MP3 192k", "audio": "🎧 Best Audio",
     }
     try:
         await callback_query.message.edit_text(

@@ -184,6 +184,9 @@ async def download_ytdlp(
             asyncio.run_coroutine_threadsafe(_safe_edit(progress_msg, text), loop)
 
     # Build format string — 3-level fallback so something always matches
+    is_mp3 = quality == "mp3"
+    is_audio_only = quality == "audio"
+
     if is_mp3:
         format_str = "bestaudio/best"
         postprocessors = [{
@@ -191,11 +194,15 @@ async def download_ytdlp(
             "preferredcodec": "mp3",
             "preferredquality": "192",
         }]
+    elif is_audio_only:
+        # Download best audio in its native codec — no re-encoding, no merge needed
+        format_str = "bestaudio/best"
+        postprocessors = []
     else:
         height = QUALITY_HEIGHT_MAP.get(quality, 1080)
         if height:
             # 1. DASH video at requested height + best audio
-            # 2. best DASH video+audio at any height (height was just a preference)
+            # 2. best DASH video+audio at any height
             # 3. best combined single-stream as last resort
             format_str = f"bv[height<={height}]+ba/bv+ba/b"
         else:  # "best" — no height cap
@@ -212,7 +219,8 @@ async def download_ytdlp(
         "noplaylist": True,
         "max_filesize": Config.MAX_FILE_SIZE,
     }
-    if not is_mp3:
+    # Only set merge_output_format for video downloads
+    if not is_mp3 and not is_audio_only:
         ydl_opts["merge_output_format"] = "mp4"
     if postprocessors:
         ydl_opts["postprocessors"] = postprocessors
@@ -222,11 +230,18 @@ async def download_ytdlp(
     def _run() -> str:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.extract_info(url, download=True)
-            # Look for the expected output file
-            expected_ext = ".mp3" if is_mp3 else ".mp4"
-            expected_path = os.path.join(out_dir, f"{safe_stem}{expected_ext}")
-            if os.path.exists(expected_path):
-                return expected_path
+            # Determine expected extension
+            if is_mp3:
+                expected_ext = ".mp3"
+            elif is_audio_only:
+                expected_ext = None   # yt-dlp chooses (m4a, opus, etc.)
+            else:
+                expected_ext = ".mp4"
+
+            if expected_ext:
+                expected_path = os.path.join(out_dir, f"{safe_stem}{expected_ext}")
+                if os.path.exists(expected_path):
+                    return expected_path
             # Fallback: largest file starting with the stem
             candidates = sorted(
                 [f for f in os.listdir(out_dir) if f.startswith(safe_stem)],
@@ -238,7 +253,12 @@ async def download_ytdlp(
             raise FileNotFoundError("yt-dlp: output file not found after download")
 
     file_path = await loop.run_in_executor(None, _run)
-    mime = "audio/mpeg" if is_mp3 else (mimetypes.guess_type(file_path)[0] or "video/mp4")
+    if is_mp3:
+        mime = "audio/mpeg"
+    elif is_audio_only:
+        mime = mimetypes.guess_type(file_path)[0] or "audio/mp4"
+    else:
+        mime = mimetypes.guess_type(file_path)[0] or "video/mp4"
     return file_path, mime
 
 
