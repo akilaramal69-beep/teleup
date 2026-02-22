@@ -7,7 +7,10 @@ from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from plugins.config import Config
 from plugins.helper.database import add_user, get_user, update_user, is_banned
-from plugins.helper.upload import download_url, upload_file, humanbytes, smart_output_name
+from plugins.helper.upload import (
+    download_url, upload_file, humanbytes,
+    smart_output_name, is_ytdlp_url, fetch_ytdlp_title,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # State dicts
@@ -51,6 +54,10 @@ HELP_TEXT = """
 ➤ /ban `<id>` – Ban a user ⛔
 ➤ /unban `<id>` – Unban a user ✅
 ➤ /status – Bot resource usage 🚀
+
+**Supported platforms (via yt-dlp):**
+YouTube · Instagram · Twitter/X · TikTok · Facebook · Reddit
+Vimeo · Dailymotion · Twitch · SoundCloud · Bilibili + more
 """
 
 ABOUT_TEXT = """
@@ -309,7 +316,17 @@ async def upload_handler(client: Client, message: Message):
             quote=True,
         )
 
-    orig_filename = smart_output_name(extract_filename(url))
+    # For yt-dlp URLs, fetch the video title to use as suggested filename
+    if is_ytdlp_url(url):
+        status_info = await message.reply_text("🔍 Fetching video info…", quote=True)
+        fetched = await fetch_ytdlp_title(url)
+        try:
+            await status_info.delete()
+        except Exception:
+            pass
+        orig_filename = fetched or smart_output_name(extract_filename(url))
+    else:
+        orig_filename = smart_output_name(extract_filename(url))
     PENDING_RENAMES[user.id] = {"url": url, "orig": orig_filename}
 
     kb = InlineKeyboardMarkup([
@@ -374,7 +391,17 @@ async def text_handler(client: Client, message: Message):
         await add_user(user.id, user.username)
         if await is_banned(user.id):
             return await message.reply_text("🚫 You are banned.")
-        orig_filename = smart_output_name(extract_filename(text))
+        # For yt-dlp URLs, fetch video title as suggested filename
+        if is_ytdlp_url(text):
+            status_info = await message.reply_text("🔍 Fetching video info…", quote=True)
+            fetched = await fetch_ytdlp_title(text)
+            try:
+                await status_info.delete()
+            except Exception:
+                pass
+            orig_filename = fetched or smart_output_name(extract_filename(text))
+        else:
+            orig_filename = smart_output_name(extract_filename(text))
         PENDING_RENAMES[user.id] = {"url": text, "orig": orig_filename}
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("⏭ Skip (keep original)", callback_data=f"skip_rename:{user.id}")]

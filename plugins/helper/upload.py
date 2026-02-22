@@ -46,9 +46,160 @@ def smart_output_name(filename: str) -> str:
     stem, ext = os.path.splitext(filename)
     return stem + STREAMING_EXTENSIONS.get(ext.lower(), ext)
 
+# ── yt-dlp integration ───────────────────────────────────────────────────────
+
+try:
+    import yt_dlp
+    YTDLP_AVAILABLE = True
+except ImportError:
+    YTDLP_AVAILABLE = False
+
+# Domains where yt-dlp should be used instead of direct HTTP download
+YTDLP_DOMAINS = {
+    "youtube.com", "youtu.be", "youtube-nocookie.com",
+    "instagram.com",
+    "twitter.com", "x.com", "t.co",
+    "tiktok.com", "vm.tiktok.com",
+    "facebook.com", "fb.watch", "fb.com",
+    "reddit.com", "v.redd.it", "redd.it",
+    "dailymotion.com", "dai.ly",
+    "vimeo.com",
+    "twitch.tv", "clips.twitch.tv",
+    "soundcloud.com",
+    "bilibili.com", "b23.tv",
+    "pinterest.com",
+    "streamable.com",
+    "rumble.com",
+    "odysee.com",
+    "bitchute.com",
+    "mixcloud.com",
+}
 
 
-# ── Formatting helpers ────────────────────────────────────────────────────────
+def is_ytdlp_url(url: str) -> bool:
+    """Return True if the URL belongs to a yt-dlp-supported platform."""
+    if not YTDLP_AVAILABLE:
+        return False
+    try:
+        host = urllib.parse.urlparse(url).netloc.lower().lstrip("www.")
+        return any(host == d or host.endswith("." + d) for d in YTDLP_DOMAINS)
+    except Exception:
+        return False
+
+
+async def _safe_edit(msg, text: str):
+    """Edit a Telegram message, silently ignoring all errors."""
+    try:
+        await msg.edit_text(text)
+    except Exception:
+        pass
+
+
+async def fetch_ytdlp_title(url: str) -> str | None:
+    """
+    Extract the video title from yt-dlp (no download).
+    Returns a clean filename like 'My Video Title.mp4', or None on failure.
+    """
+    if not YTDLP_AVAILABLE:
+        return None
+    loop = asyncio.get_running_loop()
+
+    def _fetch():
+        try:
+            opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                title = info.get("title") or info.get("id") or "video"
+                title = re.sub(r'[\\/*?"<>|:\n\r\t]', "_", title).strip()
+                return f"{title[:180]}.mp4"
+        except Exception:
+            return None
+
+    return await loop.run_in_executor(None, _fetch)
+
+
+async def download_ytdlp(
+    url: str,
+    filename: str,
+    progress_msg,
+    start_time_ref: list,
+) -> tuple[str, str]:
+    """
+    Download content using yt-dlp with live progress.
+    Uses the user-supplied filename as the output stem.
+    Returns (file_path, mime_type).
+    """
+    start_time_ref[0] = time.time()
+    loop = asyncio.get_running_loop()
+    last_edit = [start_time_ref[0]]
+
+    out_dir = Config.DOWNLOAD_LOCATION
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Build a safe output stem from the user-chosen filename
+    safe_stem = re.sub(r'[\\/*?"<>|:]', "_", os.path.splitext(filename)[0])[:190]
+    outtmpl = os.path.join(out_dir, f"{safe_stem}.%(ext)s")
+
+    def _progress_hook(d: dict):
+        now = time.time()
+        if d["status"] == "downloading" and now - last_edit[0] >= PROGRESS_UPDATE_DELAY:
+            last_edit[0] = now
+            done = d.get("downloaded_bytes", 0)
+            total = d.get("total_bytes") or d.get("total_bytes_estimate", 0)
+            speed = d.get("speed") or 0
+            eta = d.get("eta") or 0
+            bar = progress_bar(done, total) if total else "░" * 12
+            pct = f"{done / total * 100:.1f}%" if total else "…"
+            text = (
+                f"📥 **Downloading via yt-dlp…**\n\n"
+                f"[{bar}] {pct}\n"
+                f"**Done:** {humanbytes(done)}"
+                + (f" / {humanbytes(total)}" if total else "")
+                + (f"\n**Speed:** {humanbytes(speed)}/s" if speed else "")
+                + (f"\n**ETA:** {time_formatter(eta)}" if eta else "")
+            )
+            asyncio.run_coroutine_threadsafe(_safe_edit(progress_msg, text), loop)
+
+    ydl_opts = {
+        # Prefer H.264 mp4 + M4A audio; fall back to best available
+        "format": (
+            "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]"
+            "/bestvideo[height<=1080]+bestaudio"
+            "/best[height<=1080]/best"
+        ),
+        "outtmpl": outtmpl,
+        "progress_hooks": [_progress_hook],
+        "quiet": True,
+        "no_warnings": True,
+        "merge_output_format": "mp4",
+        "overwrites": True,
+        "noplaylist": True,          # single video only
+        "max_filesize": Config.MAX_FILE_SIZE,
+    }
+
+    def _run() -> str:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            # Merged mp4 is the most likely output
+            mp4_path = os.path.join(out_dir, f"{safe_stem}.mp4")
+            if os.path.exists(mp4_path):
+                return mp4_path
+            # Fallback: find any file starting with the safe stem
+            candidates = sorted(
+                [f for f in os.listdir(out_dir) if f.startswith(safe_stem)],
+                key=lambda f: os.path.getsize(os.path.join(out_dir, f)),
+                reverse=True,
+            )
+            if candidates:
+                return os.path.join(out_dir, candidates[0])
+            raise FileNotFoundError("yt-dlp: output file not found after download")
+
+    file_path = await loop.run_in_executor(None, _run)
+    mime = mimetypes.guess_type(file_path)[0] or "video/mp4"
+    return file_path, mime
+
+
+
 
 def humanbytes(size: int) -> str:
     if not size:
@@ -202,6 +353,16 @@ async def download_url(url: str, filename: str, progress_msg, start_time_ref: li
             "Chrome/120.0.0.0 Safari/537.36"
         )
     }
+
+    # ── Route yt-dlp-supported platforms ─────────────────────────────────────
+    if is_ytdlp_url(url):
+        try:
+            await progress_msg.edit_text(
+                "📥 **Fetching from yt-dlp…**\n_(connecting to platform…)_"
+            )
+        except Exception:
+            pass
+        return await download_ytdlp(url, filename, progress_msg, start_time_ref)
 
     # ── Probe the URL to detect content type ─────────────────────────────────
     async with aiohttp.ClientSession(headers=headers) as probe_session:
