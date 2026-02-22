@@ -27,7 +27,20 @@ PENDING_QUALITY: dict[int, dict] = {}   # {user_id: {"url": str, "filename": str
 def extract_filename(url: str) -> str:
     parsed = urllib.parse.urlparse(url)
     name = os.path.basename(parsed.path.rstrip("/"))
-    return urllib.parse.unquote(name) if name else "downloaded_file"
+    name = urllib.parse.unquote(name) if name else ""
+    # For YouTube-style URLs the path segment is useless (e.g. 'watch', 'reel', 'shorts')
+    # Fall back to the video ID from the query string or last path segment
+    USELESS_NAMES = {"watch", "reel", "shorts", "video", "embed", "v", "e"}
+    if not name or name.lower() in USELESS_NAMES:
+        # Try query param 'v' (YouTube) or 'id'
+        qs = urllib.parse.parse_qs(parsed.query)
+        vid_id = qs.get("v", qs.get("id", [""]))[0]
+        if vid_id:
+            return f"{vid_id}.mp4"
+        # Last non-empty path segment
+        parts = [p for p in parsed.path.split("/") if p]
+        name = parts[-1] if parts else "download"
+    return name if name else "downloaded_file"
 
 
 HELP_TEXT = """
@@ -81,19 +94,25 @@ Upload files up to **2 GB** directly to Telegram from any direct URL.
 #  Build the Mode-selection keyboard
 # ─────────────────────────────────────────────────────────────────────────────
 
-def mode_keyboard(user_id: int) -> InlineKeyboardMarkup:
+def quality_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🎬 Media", callback_data=f"mode:{user_id}:media"),
-            InlineKeyboardButton("📄 Document", callback_data=f"mode:{user_id}:doc"),
-        ]
+            InlineKeyboardButton("360p",    callback_data=f"quality:{user_id}:360p"),
+            InlineKeyboardButton("480p",    callback_data=f"quality:{user_id}:480p"),
+            InlineKeyboardButton("720p 📺",  callback_data=f"quality:{user_id}:720p"),
+        ],
+        [
+            InlineKeyboardButton("1080p ⭐", callback_data=f"quality:{user_id}:1080p"),
+            InlineKeyboardButton("🏆 Best",  callback_data=f"quality:{user_id}:best"),
+            InlineKeyboardButton("🎧 MP3",   callback_data=f"quality:{user_id}:mp3"),
+        ],
     ])
 
 
 def mode_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🎥 Media", callback_data=f"mode:{user_id}:media"),
+            InlineKeyboardButton("🎬 Media",    callback_data=f"mode:{user_id}:media"),
             InlineKeyboardButton("📄 Document", callback_data=f"mode:{user_id}:doc"),
         ]
     ])
