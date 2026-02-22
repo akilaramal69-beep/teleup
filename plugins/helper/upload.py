@@ -183,7 +183,7 @@ async def download_ytdlp(
             )
             asyncio.run_coroutine_threadsafe(_safe_edit(progress_msg, text), loop)
 
-    # Build format string — avoid restricting ext so yt-dlp always finds a match
+    # Build format string — 3-level fallback so something always matches
     if is_mp3:
         format_str = "bestaudio/best"
         postprocessors = [{
@@ -194,13 +194,12 @@ async def download_ytdlp(
     else:
         height = QUALITY_HEIGHT_MAP.get(quality, 1080)
         if height:
-            # Do NOT restrict ext; merge_output_format=mp4 handles the container
-            format_str = (
-                f"bestvideo[height<={height}]+bestaudio"
-                f"/best[height<={height}]/best"
-            )
+            # 1. DASH video at requested height + best audio
+            # 2. best DASH video+audio at any height (height was just a preference)
+            # 3. best combined single-stream as last resort
+            format_str = f"bv[height<={height}]+ba/bv+ba/b"
         else:  # "best" — no height cap
-            format_str = "bestvideo+bestaudio/best"
+            format_str = "bv+ba/b"
         postprocessors = []
 
     ydl_opts: dict = {
