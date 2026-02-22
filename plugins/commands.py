@@ -9,7 +9,7 @@ from plugins.config import Config
 from plugins.helper.database import add_user, get_user, update_user, is_banned
 from plugins.helper.upload import (
     download_url, upload_file, humanbytes,
-    smart_output_name, is_ytdlp_url, fetch_ytdlp_title,
+    smart_output_name, is_ytdlp_url, fetch_ytdlp_info,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -94,19 +94,29 @@ Upload files up to **2 GB** directly to Telegram from any direct URL.
 #  Build the Mode-selection keyboard
 # ─────────────────────────────────────────────────────────────────────────────
 
-def quality_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("360p",    callback_data=f"quality:{user_id}:360p"),
-            InlineKeyboardButton("480p",    callback_data=f"quality:{user_id}:480p"),
-            InlineKeyboardButton("720p 📺",  callback_data=f"quality:{user_id}:720p"),
-        ],
-        [
-            InlineKeyboardButton("1080p ⭐", callback_data=f"quality:{user_id}:1080p"),
-            InlineKeyboardButton("🏆 Best",  callback_data=f"quality:{user_id}:best"),
-            InlineKeyboardButton("🎧 MP3",   callback_data=f"quality:{user_id}:mp3"),
-        ],
-    ])
+# Standard quality breakpoints shown in the selector
+_STD_QUALITIES = [("360p", 360), ("480p", 480), ("720p 📺", 720), ("1080p ⭐", 1080)]
+
+
+def quality_keyboard_from_heights(user_id: int, heights: list) -> InlineKeyboardMarkup:
+    """
+    Build the quality selector keyboard from the video's real available heights.
+    Always includes '\U0001f3c6 Best' and '\U0001f3a7 MP3'. Shows a standard height
+    button only if that height is <= the video's maximum available height.
+    """
+    max_h = max(heights) if heights else 0
+    buttons = [
+        InlineKeyboardButton(label, callback_data=f"quality:{user_id}:{h}p")
+        for label, h in _STD_QUALITIES
+        if max_h >= h
+    ]
+    buttons += [
+        InlineKeyboardButton("🏆 Best", callback_data=f"quality:{user_id}:best"),
+        InlineKeyboardButton("🎧 MP3",  callback_data=f"quality:{user_id}:mp3"),
+    ]
+    # Lay out in rows of 3
+    rows = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
+    return InlineKeyboardMarkup(rows)
 
 
 def mode_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -118,16 +128,20 @@ def mode_keyboard(user_id: int) -> InlineKeyboardMarkup:
     ])
 
 
-async def ask_quality(target_msg: Message, user_id: int, filename: str):
-    """Show the quality selector for yt-dlp URLs."""
+async def ask_quality(target_msg: Message, user_id: int, filename: str,
+                      heights: list):
+    """Show the quality selector using only the video's real available heights."""
+    top = f"Available: {', '.join(str(h)+'p' for h in heights)}" if heights else "Fetching failed¹"
     text = (
-        f"📁 **File:** `{filename}`\n\n"
+        f"📁 **File:** `{filename}`\n"
+        f"📊 {top}\n\n"
         "📺 Select **video quality** or choose **🎧 MP3** for audio only:"
     )
+    kb = quality_keyboard_from_heights(user_id, heights)
     try:
-        await target_msg.edit_text(text, reply_markup=quality_keyboard(user_id))
+        await target_msg.edit_text(text, reply_markup=kb)
     except Exception:
-        await target_msg.reply_text(text, reply_markup=quality_keyboard(user_id), quote=True)
+        await target_msg.reply_text(text, reply_markup=kb, quote=True)
 
 
 async def ask_mode(target_msg: Message, user_id: int, filename: str):
@@ -219,11 +233,13 @@ async def resolve_rename(
     user_id: int,
     url: str,
     filename: str,
+    heights: list | None = None,
 ):
-    """Route to quality selector (yt-dlp URLs) or Media/Document selector (direct links)."""
+    """Route to quality selector (yt-dlp) or Media/Document selector (direct)."""
     if is_ytdlp_url(url):
-        PENDING_QUALITY[user_id] = {"url": url, "filename": filename}
-        await ask_quality(prompt_msg, user_id, filename)
+        h = heights or []
+        PENDING_QUALITY[user_id] = {"url": url, "filename": filename, "heights": h}
+        await ask_quality(prompt_msg, user_id, filename, h)
     else:
         PENDING_MODE[user_id] = {"url": url, "filename": filename}
         await ask_mode(prompt_msg, user_id, filename)
@@ -405,18 +421,20 @@ async def upload_handler(client: Client, message: Message):
             quote=True,
         )
 
-    # For yt-dlp URLs, fetch the video title to use as suggested filename
+    # For yt-dlp URLs, fetch the video title and available heights
+    heights = []
     if is_ytdlp_url(url):
         status_info = await message.reply_text("🔍 Fetching video info…", quote=True)
-        fetched = await fetch_ytdlp_title(url)
+        info = await fetch_ytdlp_info(url)
         try:
             await status_info.delete()
         except Exception:
             pass
-        orig_filename = fetched or smart_output_name(extract_filename(url))
+        orig_filename = info["title"] or smart_output_name(extract_filename(url))
+        heights = info["heights"]
     else:
         orig_filename = smart_output_name(extract_filename(url))
-    PENDING_RENAMES[user.id] = {"url": url, "orig": orig_filename}
+    PENDING_RENAMES[user.id] = {"url": url, "orig": orig_filename, "heights": heights}
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("⏭ Skip (keep original)", callback_data=f"skip_rename:{user.id}")]
@@ -442,7 +460,8 @@ async def skip_handler(client: Client, message: Message):
         return await message.reply_text("❌ No pending upload. Send a URL first.", quote=True)
 
     prompt = await message.reply_text("⏭ Keeping original filename…", quote=True)
-    await resolve_rename(client, prompt, user_id, pending["url"], pending["orig"])
+    await resolve_rename(client, prompt, user_id, pending["url"], pending["orig"],
+                         heights=pending.get("heights", []))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -472,7 +491,8 @@ async def text_handler(client: Client, message: Message):
             new_name = new_name + orig_ext
 
         prompt = await message.reply_text(f"✏️ Renamed to: `{new_name}`", quote=True)
-        await resolve_rename(client, prompt, user.id, pending["url"], new_name)
+        await resolve_rename(client, prompt, user.id, pending["url"], new_name,
+                             heights=pending.get("heights", []))
         return
 
     # ── Bare URL ──────────────────────────────────────────────────────────────
@@ -483,15 +503,17 @@ async def text_handler(client: Client, message: Message):
         # For yt-dlp URLs, fetch video title as suggested filename
         if is_ytdlp_url(text):
             status_info = await message.reply_text("🔍 Fetching video info…", quote=True)
-            fetched = await fetch_ytdlp_title(text)
+            info = await fetch_ytdlp_info(text)
             try:
                 await status_info.delete()
             except Exception:
                 pass
-            orig_filename = fetched or smart_output_name(extract_filename(text))
+            orig_filename = info["title"] or smart_output_name(extract_filename(text))
+            heights = info["heights"]
         else:
             orig_filename = smart_output_name(extract_filename(text))
-        PENDING_RENAMES[user.id] = {"url": text, "orig": orig_filename}
+            heights = []
+        PENDING_RENAMES[user.id] = {"url": text, "orig": orig_filename, "heights": heights}
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("⏭ Skip (keep original)", callback_data=f"skip_rename:{user.id}")]
         ])

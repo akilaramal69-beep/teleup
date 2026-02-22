@@ -104,13 +104,13 @@ async def _safe_edit(msg, text: str):
         pass
 
 
-async def fetch_ytdlp_title(url: str) -> str | None:
+async def fetch_ytdlp_info(url: str) -> dict:
     """
-    Extract the video title from yt-dlp (no download).
-    Returns a clean filename like 'My Video Title.mp4', or None on failure.
+    Fetch video title and available heights from yt-dlp without downloading.
+    Returns: {"title": str | None, "heights": list[int]}
     """
     if not YTDLP_AVAILABLE:
-        return None
+        return {"title": None, "heights": []}
     loop = asyncio.get_running_loop()
 
     def _fetch():
@@ -120,11 +120,20 @@ async def fetch_ytdlp_title(url: str) -> str | None:
                 opts["cookiefile"] = Config.YT_COOKIES_FILE
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                title = info.get("title") or info.get("id") or "video"
-                title = re.sub(r'[\\/*?"<>|:\n\r\t]', "_", title).strip()
-                return f"{title[:180]}.mp4"
+                # Title
+                raw = info.get("title") or info.get("id") or "video"
+                title = re.sub(r'[\\/*?"<>|:\n\r\t]', "_", raw).strip()
+                title = f"{title[:180]}.mp4"
+                # Available video-only heights (deduplicated, sorted)
+                heights = sorted(set(
+                    int(f["height"])
+                    for f in info.get("formats", [])
+                    if f.get("height") and f.get("vcodec", "none") != "none"
+                    and int(f.get("height", 0)) > 0
+                ))
+                return {"title": title, "heights": heights}
         except Exception:
-            return None
+            return {"title": None, "heights": []}
 
     return await loop.run_in_executor(None, _fetch)
 
@@ -174,7 +183,7 @@ async def download_ytdlp(
             )
             asyncio.run_coroutine_threadsafe(_safe_edit(progress_msg, text), loop)
 
-    # Build format string
+    # Build format string — avoid restricting ext so yt-dlp always finds a match
     if is_mp3:
         format_str = "bestaudio/best"
         postprocessors = [{
@@ -185,13 +194,13 @@ async def download_ytdlp(
     else:
         height = QUALITY_HEIGHT_MAP.get(quality, 1080)
         if height:
+            # Do NOT restrict ext; merge_output_format=mp4 handles the container
             format_str = (
-                f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]"
-                f"/bestvideo[height<={height}]+bestaudio"
+                f"bestvideo[height<={height}]+bestaudio"
                 f"/best[height<={height}]/best"
             )
         else:  # "best" — no height cap
-            format_str = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+            format_str = "bestvideo+bestaudio/best"
         postprocessors = []
 
     ydl_opts: dict = {
