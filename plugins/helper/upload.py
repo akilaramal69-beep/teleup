@@ -115,7 +115,13 @@ async def fetch_ytdlp_info(url: str) -> dict:
 
     def _fetch():
         try:
-            opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+            opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "skip_download": True,
+                # Use iOS client — bypasses YouTube bot detection for format lists
+                "extractor_args": {"youtube": {"player_client": ["ios", "web"]}},
+            }
             if Config.YT_COOKIES_FILE:
                 opts["cookiefile"] = Config.YT_COOKIES_FILE
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -218,6 +224,8 @@ async def download_ytdlp(
         "overwrites": True,
         "noplaylist": True,
         "max_filesize": Config.MAX_FILE_SIZE,
+        # iOS player client bypasses YouTube's web bot-detection format restrictions
+        "extractor_args": {"youtube": {"player_client": ["ios", "web"]}},
     }
     # Only set merge_output_format for video downloads
     if not is_mp3 and not is_audio_only:
