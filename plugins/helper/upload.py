@@ -107,6 +107,8 @@ async def fetch_ytdlp_title(url: str) -> str | None:
     def _fetch():
         try:
             opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+            if Config.YT_COOKIES_FILE:
+                opts["cookiefile"] = Config.YT_COOKIES_FILE
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 title = info.get("title") or info.get("id") or "video"
@@ -176,6 +178,9 @@ async def download_ytdlp(
         "noplaylist": True,          # single video only
         "max_filesize": Config.MAX_FILE_SIZE,
     }
+    # Pass cookies file when available (bypasses YouTube bot detection)
+    if Config.YT_COOKIES_FILE:
+        ydl_opts["cookiefile"] = Config.YT_COOKIES_FILE
 
     def _run() -> str:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
