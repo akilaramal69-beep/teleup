@@ -191,12 +191,8 @@ async def download_ytdlp(
             asyncio.run_coroutine_threadsafe(_safe_edit(progress_msg, text), loop)
 
     # ── Build ydl options ─────────────────────────────────────────────────────
-    # Strategy: use a simple format string + format_sort for quality preference.
-    # format_sort just RE-ORDERS whatever formats exist — it never throws
-    # "format not available" unlike hard filter selectors like bv[height<=720]+ba.
-
     if is_mp3:
-        format_str = "bestaudio/best"
+        format_str = "bestaudio*/best"
         format_sort = []
         postprocessors = [{
             "key": "FFmpegExtractAudio",
@@ -204,38 +200,36 @@ async def download_ytdlp(
             "preferredquality": "192",
         }]
     elif is_audio_only:
-        format_str = "bestaudio/best"
+        format_str = "bestaudio*/best"
         format_sort = []
         postprocessors = []
     else:
-        # "bestvideo+bestaudio/best" works for BOTH DASH (separate streams)
-        # and muxed (combined) streams — no hard height filter that can fail.
-        format_str = "bestvideo+bestaudio/best"
+        # bestvideo*+bestaudio* covers BOTH DASH separate streams AND combined muxed
+        # The * variant includes video+audio combined formats, not just video-only
+        format_str = "bestvideo*+bestaudio*/best*"
         height = QUALITY_HEIGHT_MAP.get(quality)   # None for "best"
-        # format_sort controls PREFERENCE without restricting availability
-        if height:
-            format_sort = [f"res:{height}", "ext:mp4:m4a", "vcodec:h264:vp9:av01"]
-        else:
-            format_sort = ["ext:mp4:m4a", "vcodec:h264:vp9:av01"]
+        format_sort = [f"res:{height}"] if height else []
         postprocessors = []
 
     ydl_opts: dict = {
         "format": format_str,
         "outtmpl": outtmpl,
         "progress_hooks": [_progress_hook],
-        "quiet": True,
-        "no_warnings": True,
+        "quiet": False,          # enable output so Koyeb logs show format details
+        "no_warnings": False,
         "overwrites": True,
         "noplaylist": True,
         "max_filesize": Config.MAX_FILE_SIZE,
-        # Multiple player clients — maximises format availability on YouTube
+        # check_formats=False: skip pre-checking format URLs — server IPs often
+        # get 403 on format probe even when the actual download works fine
+        "check_formats": False,
+        # Try multiple player APIs; ios/android bypass web bot-detection
         "extractor_args": {"youtube": {
             "player_client": ["ios", "android", "tv_embedded", "web"],
         }},
     }
     if format_sort:
         ydl_opts["format_sort"] = format_sort
-    # Only set merge_output_format for video downloads
     if not is_mp3 and not is_audio_only:
         ydl_opts["merge_output_format"] = "mp4"
     if postprocessors:
