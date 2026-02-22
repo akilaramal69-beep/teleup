@@ -19,7 +19,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # The yt-dlp plugin is installed via pip and auto-discovered by yt-dlp.
 RUN git clone --depth 1 --single-branch --branch 1.2.2 \
     https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil && \
-    cd /opt/bgutil/server && npm ci --omit=dev && npx tsc
+    cd /opt/bgutil/server && npm ci && npx tsc
 # pip plugin — yt-dlp picks this up automatically, no code changes needed
 RUN pip install --no-cache-dir bgutil-ytdlp-pot-provider
 
