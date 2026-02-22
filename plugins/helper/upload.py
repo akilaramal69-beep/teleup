@@ -164,6 +164,7 @@ async def download_ytdlp(
     os.makedirs(out_dir, exist_ok=True)
 
     is_mp3 = quality == "mp3"
+    is_audio_only = quality == "audio"
 
     # Build a safe output stem from the user-chosen filename
     safe_stem = re.sub(r'[\\/*?"<>|:]', "_", os.path.splitext(filename)[0])[:190]
@@ -189,30 +190,33 @@ async def download_ytdlp(
             )
             asyncio.run_coroutine_threadsafe(_safe_edit(progress_msg, text), loop)
 
-    # Build format string — 3-level fallback so something always matches
-    is_mp3 = quality == "mp3"
-    is_audio_only = quality == "audio"
+    # ── Build ydl options ─────────────────────────────────────────────────────
+    # Strategy: use a simple format string + format_sort for quality preference.
+    # format_sort just RE-ORDERS whatever formats exist — it never throws
+    # "format not available" unlike hard filter selectors like bv[height<=720]+ba.
 
     if is_mp3:
         format_str = "bestaudio/best"
+        format_sort = []
         postprocessors = [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
             "preferredquality": "192",
         }]
     elif is_audio_only:
-        # Download best audio in its native codec — no re-encoding, no merge needed
         format_str = "bestaudio/best"
+        format_sort = []
         postprocessors = []
     else:
-        height = QUALITY_HEIGHT_MAP.get(quality, 1080)
+        # "bestvideo+bestaudio/best" works for BOTH DASH (separate streams)
+        # and muxed (combined) streams — no hard height filter that can fail.
+        format_str = "bestvideo+bestaudio/best"
+        height = QUALITY_HEIGHT_MAP.get(quality)   # None for "best"
+        # format_sort controls PREFERENCE without restricting availability
         if height:
-            # 1. DASH video at requested height + best audio
-            # 2. best DASH video+audio at any height
-            # 3. best combined single-stream as last resort
-            format_str = f"bv[height<={height}]+ba/bv+ba/b"
-        else:  # "best" — no height cap
-            format_str = "bv+ba/b"
+            format_sort = [f"res:{height}", "ext:mp4:m4a", "vcodec:h264:vp9:av01"]
+        else:
+            format_sort = ["ext:mp4:m4a", "vcodec:h264:vp9:av01"]
         postprocessors = []
 
     ydl_opts: dict = {
@@ -224,9 +228,13 @@ async def download_ytdlp(
         "overwrites": True,
         "noplaylist": True,
         "max_filesize": Config.MAX_FILE_SIZE,
-        # iOS player client bypasses YouTube's web bot-detection format restrictions
-        "extractor_args": {"youtube": {"player_client": ["ios", "web"]}},
+        # Multiple player clients — maximises format availability on YouTube
+        "extractor_args": {"youtube": {
+            "player_client": ["ios", "android", "tv_embedded", "web"],
+        }},
     }
+    if format_sort:
+        ydl_opts["format_sort"] = format_sort
     # Only set merge_output_format for video downloads
     if not is_mp3 and not is_audio_only:
         ydl_opts["merge_output_format"] = "mp4"
