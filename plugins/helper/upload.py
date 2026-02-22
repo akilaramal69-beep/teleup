@@ -4,12 +4,48 @@ import os
 import json
 import mimetypes
 import re
+import urllib.parse
 import aiohttp
 import aiofiles
 from pyrogram import Client
 from plugins.config import Config
 
 PROGRESS_UPDATE_DELAY = 5  # seconds between progress edits
+
+# ── Streaming / HLS detection ─────────────────────────────────────────────────
+
+# Extensions that indicate a playlist / stream, not a direct media file
+STREAMING_EXTENSIONS: dict[str, str] = {
+    ".m3u8": ".mp4",
+    ".m3u":  ".mp4",
+    ".mpd":  ".mp4",   # DASH manifest
+    ".ts":   ".mp4",   # raw MPEG-TS segment
+}
+
+HLS_MIME_TYPES = {
+    "application/vnd.apple.mpegurl",
+    "application/x-mpegurl",
+    "application/dash+xml",
+    "audio/mpegurl",
+    "audio/x-mpegurl",
+    "video/mp2t",
+}
+
+
+def needs_ffmpeg_download(url: str, mime: str) -> bool:
+    """Return True if this URL must be downloaded with ffmpeg instead of aiohttp."""
+    ext = os.path.splitext(urllib.parse.urlparse(url).path)[1].lower()
+    return ext in STREAMING_EXTENSIONS or (mime or "").lower() in HLS_MIME_TYPES
+
+
+def smart_output_name(filename: str) -> str:
+    """
+    Remap known streaming extensions to the proper container extension.
+    e.g. 'stream.m3u8' → 'stream.mp4'
+    """
+    stem, ext = os.path.splitext(filename)
+    return stem + STREAMING_EXTENSIONS.get(ext.lower(), ext)
+
 
 
 # ── Formatting helpers ────────────────────────────────────────────────────────
@@ -103,7 +139,48 @@ async def generate_video_thumbnail(file_path: str, chat_id: int, duration: int =
     return None
 
 
-# ── Download helper ───────────────────────────────────────────────────────────
+# ── Download helpers ──────────────────────────────────────────────────────────
+
+async def _download_hls(url: str, out_path: str, progress_msg, start_time_ref: list) -> str:
+    """
+    Use ffmpeg to download an HLS/DASH/TS stream and remux it to mp4.
+    Shows elapsed-time progress (no size info available for streams).
+    """
+    start_time_ref[0] = time.time()
+    last_edit = start_time_ref[0]
+
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y",
+        "-i", url,
+        "-c", "copy",
+        "-bsf:a", "aac_adtstoasc",   # fix AAC bitstream for mp4 container
+        out_path,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    # Poll until ffmpeg finishes, editing progress every PROGRESS_UPDATE_DELAY s
+    while proc.returncode is None:
+        await asyncio.sleep(1)
+        now = time.time()
+        if now - last_edit >= PROGRESS_UPDATE_DELAY:
+            elapsed = now - start_time_ref[0]
+            try:
+                await progress_msg.edit_text(
+                    f"📥 **Downloading stream via ffmpeg…**\n"
+                    f"⏱ Elapsed: {time_formatter(elapsed)}"
+                )
+            except Exception:
+                pass
+            last_edit = now
+
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        err = stderr.decode(errors="replace")[-600:]
+        raise RuntimeError(f"ffmpeg stream download failed:\n{err}")
+
+    return out_path
+
 
 async def download_url(url: str, filename: str, progress_msg, start_time_ref: list):
     """
@@ -113,6 +190,8 @@ async def download_url(url: str, filename: str, progress_msg, start_time_ref: li
     download_dir = Config.DOWNLOAD_LOCATION
     os.makedirs(download_dir, exist_ok=True)
 
+    # Remap streaming extensions to proper container (e.g. .m3u8 → .mp4)
+    filename = smart_output_name(filename)
     safe_name = re.sub(r'[\\/*?:"<>|]', "_", filename)[:200]
     file_path = os.path.join(download_dir, safe_name)
 
@@ -124,8 +203,39 @@ async def download_url(url: str, filename: str, progress_msg, start_time_ref: li
         )
     }
 
-    last_edit = time.time()
+    # ── Probe the URL to detect content type ─────────────────────────────────
+    async with aiohttp.ClientSession(headers=headers) as probe_session:
+        async with probe_session.head(
+            url, allow_redirects=True,
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as head:
+            mime = head.headers.get("Content-Type", "").split(";")[0].strip()
+            total_str = head.headers.get("Content-Length", "0")
+            total = int(total_str) if total_str.isdigit() else 0
+
+    # ── Route HLS / DASH / TS streams through ffmpeg ──────────────────────────
+    if needs_ffmpeg_download(url, mime):
+        # Force mp4 output path
+        mp4_path = os.path.splitext(file_path)[0] + ".mp4"
+        try:
+            await progress_msg.edit_text(
+                "📥 **Downloading stream…**\n"
+                "_(HLS/DASH stream detected — using ffmpeg)_"
+            )
+        except Exception:
+            pass
+        await _download_hls(url, mp4_path, progress_msg, start_time_ref)
+        return mp4_path, "video/mp4"
+
+    # ── Standard aiohttp streaming download ──────────────────────────────────
+    if total > Config.MAX_FILE_SIZE:
+        raise ValueError(
+            f"File too large: {humanbytes(total)} (max {humanbytes(Config.MAX_FILE_SIZE)})"
+        )
+
     start_time_ref[0] = time.time()
+    last_edit = start_time_ref[0]
+    downloaded = 0
 
     async with aiohttp.ClientSession(headers=headers) as session:
         async with session.get(
@@ -134,13 +244,11 @@ async def download_url(url: str, filename: str, progress_msg, start_time_ref: li
             timeout=aiohttp.ClientTimeout(total=Config.PROCESS_MAX_TIMEOUT),
         ) as resp:
             resp.raise_for_status()
-            total = int(resp.headers.get("Content-Length", 0))
-            mime = resp.content_type or "application/octet-stream"
-            if total > Config.MAX_FILE_SIZE:
-                raise ValueError(
-                    f"File too large: {humanbytes(total)} (max {humanbytes(Config.MAX_FILE_SIZE)})"
-                )
-            downloaded = 0
+            # Refine content-length/mime from GET response
+            if not total:
+                total = int(resp.headers.get("Content-Length", 0))
+            mime = resp.content_type or mime or "application/octet-stream"
+
             async with aiofiles.open(file_path, "wb") as f:
                 async for chunk in resp.content.iter_chunked(Config.CHUNK_SIZE):
                     await f.write(chunk)
@@ -168,6 +276,7 @@ async def download_url(url: str, filename: str, progress_msg, start_time_ref: li
     mime_from_ext = mimetypes.guess_type(file_path)[0]
     final_mime = mime_from_ext or mime
     return file_path, final_mime
+
 
 
 # ── Upload helper ─────────────────────────────────────────────────────────────

@@ -7,7 +7,7 @@ from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from plugins.config import Config
 from plugins.helper.database import add_user, get_user, update_user, is_banned
-from plugins.helper.upload import download_url, upload_file, humanbytes
+from plugins.helper.upload import download_url, upload_file, humanbytes, smart_output_name
 
 # ─────────────────────────────────────────────────────────────────────────────
 # State dicts
@@ -309,7 +309,7 @@ async def upload_handler(client: Client, message: Message):
             quote=True,
         )
 
-    orig_filename = extract_filename(url)
+    orig_filename = smart_output_name(extract_filename(url))
     PENDING_RENAMES[user.id] = {"url": url, "orig": orig_filename}
 
     kb = InlineKeyboardMarkup([
@@ -374,7 +374,7 @@ async def text_handler(client: Client, message: Message):
         await add_user(user.id, user.username)
         if await is_banned(user.id):
             return await message.reply_text("🚫 You are banned.")
-        orig_filename = extract_filename(text)
+        orig_filename = smart_output_name(extract_filename(text))
         PENDING_RENAMES[user.id] = {"url": text, "orig": orig_filename}
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("⏭ Skip (keep original)", callback_data=f"skip_rename:{user.id}")]
