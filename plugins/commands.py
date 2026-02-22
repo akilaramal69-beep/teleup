@@ -19,6 +19,7 @@ from plugins.helper.upload import (
 # ─────────────────────────────────────────────────────────────────────────────
 PENDING_RENAMES: dict[int, dict] = {}   # {user_id: {"url": str, "orig": str}}
 PENDING_MODE: dict[int, dict] = {}      # {user_id: {"url": str, "filename": str}}
+PENDING_QUALITY: dict[int, dict] = {}   # {user_id: {"url": str, "filename": str}}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -89,6 +90,27 @@ def mode_keyboard(user_id: int) -> InlineKeyboardMarkup:
     ])
 
 
+def mode_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🎥 Media", callback_data=f"mode:{user_id}:media"),
+            InlineKeyboardButton("📄 Document", callback_data=f"mode:{user_id}:doc"),
+        ]
+    ])
+
+
+async def ask_quality(target_msg: Message, user_id: int, filename: str):
+    """Show the quality selector for yt-dlp URLs."""
+    text = (
+        f"📁 **File:** `{filename}`\n\n"
+        "📺 Select **video quality** or choose **🎧 MP3** for audio only:"
+    )
+    try:
+        await target_msg.edit_text(text, reply_markup=quality_keyboard(user_id))
+    except Exception:
+        await target_msg.reply_text(text, reply_markup=quality_keyboard(user_id), quote=True)
+
+
 async def ask_mode(target_msg: Message, user_id: int, filename: str):
     """Edit or reply with the upload-mode selection prompt."""
     text = (
@@ -107,11 +129,12 @@ async def ask_mode(target_msg: Message, user_id: int, filename: str):
 
 async def do_upload(
     client: Client,
-    reply_to: Message,         # message to reply status updates into
-    user_id: int,              # real user id (NOT from reply_to.from_user)
+    reply_to: Message,
+    user_id: int,
     url: str,
     filename: str,
     force_document: bool = False,
+    quality: str = "1080p",
 ):
     status_msg = await reply_to.reply_text(
         f"📥 Starting download…\n`{filename}`", quote=True
@@ -119,7 +142,8 @@ async def do_upload(
     start_time = [time.time()]
     file_path = None
     try:
-        file_path, mime = await download_url(url, filename, status_msg, start_time)
+        file_path, mime = await download_url(url, filename, status_msg, start_time,
+                                              quality=quality)
         file_size = os.path.getsize(file_path)
 
         # ── User settings ──────────────────────────────────────────────────
@@ -148,7 +172,7 @@ async def do_upload(
                     f"🔗 `{url}`\n"
                     f"📁 `{os.path.basename(file_path)}`\n"
                     f"💾 {humanbytes(file_size)} · ⏱ {elapsed:.1f}s\n"
-                    f"📦 Mode: {'Document' if force_document else 'Media'}",
+                    f"📦 Mode: {'Document' if force_document else quality if quality == 'mp3' else f'Media ({quality})'}",
                 )
             except Exception:
                 pass
@@ -172,14 +196,18 @@ async def do_upload(
 
 async def resolve_rename(
     client: Client,
-    prompt_msg: Message,   # the bot's rename prompt message
+    prompt_msg: Message,
     user_id: int,
     url: str,
     filename: str,
 ):
-    """Store pending mode and ask Media vs Document."""
-    PENDING_MODE[user_id] = {"url": url, "filename": filename}
-    await ask_mode(prompt_msg, user_id, filename)
+    """Route to quality selector (yt-dlp URLs) or Media/Document selector (direct links)."""
+    if is_ytdlp_url(url):
+        PENDING_QUALITY[user_id] = {"url": url, "filename": filename}
+        await ask_quality(prompt_msg, user_id, filename)
+    else:
+        PENDING_MODE[user_id] = {"url": url, "filename": filename}
+        await ask_mode(prompt_msg, user_id, filename)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -288,6 +316,48 @@ async def mode_cb(client: Client, callback_query: CallbackQuery):
         pending["url"],
         pending["filename"],
         force_document=(choice == "doc"),
+    )
+
+
+@Client.on_callback_query(filters.regex(r"^quality:(\d+):(360p|480p|720p|1080p|best|mp3)$"))
+async def quality_cb(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    parts = callback_query.data.split(":")
+    target_id = int(parts[1])
+    quality = parts[2]   # "360p" | "480p" | "720p" | "1080p" | "best" | "mp3"
+
+    if user_id != target_id:
+        return await callback_query.answer("Not your upload!", show_alert=True)
+
+    pending = PENDING_QUALITY.pop(user_id, None)
+    if not pending:
+        return await callback_query.answer("Already processed or expired.", show_alert=True)
+
+    await callback_query.answer()
+
+    # For MP3, force .mp3 extension on the output filename
+    filename = pending["filename"]
+    if quality == "mp3":
+        filename = os.path.splitext(filename)[0] + ".mp3"
+
+    label_map = {
+        "360p": "360p", "480p": "480p", "720p": "720p 📺",
+        "1080p": "1080p ⭐", "best": "🏆 Best Quality", "mp3": "🎧 MP3",
+    }
+    try:
+        await callback_query.message.edit_text(
+            f"⬇️ Downloading **{label_map.get(quality, quality)}**…\n`{filename}`"
+        )
+    except Exception:
+        pass
+
+    await do_upload(
+        client,
+        callback_query.message,
+        user_id,
+        pending["url"],
+        filename,
+        quality=quality,
     )
 
 

@@ -22,6 +22,15 @@ STREAMING_EXTENSIONS: dict[str, str] = {
     ".ts":   ".mp4",   # raw MPEG-TS segment
 }
 
+# Quality label → max height (None = no limit = absolute best)
+QUALITY_HEIGHT_MAP: dict[str, int | None] = {
+    "360p":  360,
+    "480p":  480,
+    "720p":  720,
+    "1080p": 1080,
+    "best":  None,
+}
+
 HLS_MIME_TYPES = {
     "application/vnd.apple.mpegurl",
     "application/x-mpegurl",
@@ -125,10 +134,11 @@ async def download_ytdlp(
     filename: str,
     progress_msg,
     start_time_ref: list,
+    quality: str = "1080p",
 ) -> tuple[str, str]:
     """
     Download content using yt-dlp with live progress.
-    Uses the user-supplied filename as the output stem.
+    quality: '360p' | '480p' | '720p' | '1080p' | 'best' | 'mp3'
     Returns (file_path, mime_type).
     """
     start_time_ref[0] = time.time()
@@ -137,6 +147,8 @@ async def download_ytdlp(
 
     out_dir = Config.DOWNLOAD_LOCATION
     os.makedirs(out_dir, exist_ok=True)
+
+    is_mp3 = quality == "mp3"
 
     # Build a safe output stem from the user-chosen filename
     safe_stem = re.sub(r'[\\/*?"<>|:]', "_", os.path.splitext(filename)[0])[:190]
@@ -162,34 +174,52 @@ async def download_ytdlp(
             )
             asyncio.run_coroutine_threadsafe(_safe_edit(progress_msg, text), loop)
 
-    ydl_opts = {
-        # Prefer H.264 mp4 + M4A audio; fall back to best available
-        "format": (
-            "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]"
-            "/bestvideo[height<=1080]+bestaudio"
-            "/best[height<=1080]/best"
-        ),
+    # Build format string
+    if is_mp3:
+        format_str = "bestaudio/best"
+        postprocessors = [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
+        }]
+    else:
+        height = QUALITY_HEIGHT_MAP.get(quality, 1080)
+        if height:
+            format_str = (
+                f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]"
+                f"/bestvideo[height<={height}]+bestaudio"
+                f"/best[height<={height}]/best"
+            )
+        else:  # "best" — no height cap
+            format_str = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+        postprocessors = []
+
+    ydl_opts: dict = {
+        "format": format_str,
         "outtmpl": outtmpl,
         "progress_hooks": [_progress_hook],
         "quiet": True,
         "no_warnings": True,
-        "merge_output_format": "mp4",
         "overwrites": True,
-        "noplaylist": True,          # single video only
+        "noplaylist": True,
         "max_filesize": Config.MAX_FILE_SIZE,
     }
-    # Pass cookies file when available (bypasses YouTube bot detection)
+    if not is_mp3:
+        ydl_opts["merge_output_format"] = "mp4"
+    if postprocessors:
+        ydl_opts["postprocessors"] = postprocessors
     if Config.YT_COOKIES_FILE:
         ydl_opts["cookiefile"] = Config.YT_COOKIES_FILE
 
     def _run() -> str:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            # Merged mp4 is the most likely output
-            mp4_path = os.path.join(out_dir, f"{safe_stem}.mp4")
-            if os.path.exists(mp4_path):
-                return mp4_path
-            # Fallback: find any file starting with the safe stem
+            ydl.extract_info(url, download=True)
+            # Look for the expected output file
+            expected_ext = ".mp3" if is_mp3 else ".mp4"
+            expected_path = os.path.join(out_dir, f"{safe_stem}{expected_ext}")
+            if os.path.exists(expected_path):
+                return expected_path
+            # Fallback: largest file starting with the stem
             candidates = sorted(
                 [f for f in os.listdir(out_dir) if f.startswith(safe_stem)],
                 key=lambda f: os.path.getsize(os.path.join(out_dir, f)),
@@ -200,7 +230,7 @@ async def download_ytdlp(
             raise FileNotFoundError("yt-dlp: output file not found after download")
 
     file_path = await loop.run_in_executor(None, _run)
-    mime = mimetypes.guess_type(file_path)[0] or "video/mp4"
+    mime = "audio/mpeg" if is_mp3 else (mimetypes.guess_type(file_path)[0] or "video/mp4")
     return file_path, mime
 
 
@@ -338,17 +368,19 @@ async def _download_hls(url: str, out_path: str, progress_msg, start_time_ref: l
     return out_path
 
 
-async def download_url(url: str, filename: str, progress_msg, start_time_ref: list):
+async def download_url(url: str, filename: str, progress_msg, start_time_ref: list,
+                       quality: str = "1080p"):
     """
     Stream-download a URL to disk, editing progress_msg periodically.
     Returns (path, mime_type) on success or raises.
+    quality only applies to yt-dlp URLs.
     """
     download_dir = Config.DOWNLOAD_LOCATION
     os.makedirs(download_dir, exist_ok=True)
 
     # Remap streaming extensions to proper container (e.g. .m3u8 → .mp4)
     filename = smart_output_name(filename)
-    safe_name = re.sub(r'[\\/*?:"<>|]', "_", filename)[:200]
+    safe_name = re.sub(r'[\\/*?"<>|]', "_", filename)[:200]
     file_path = os.path.join(download_dir, safe_name)
 
     headers = {
@@ -367,7 +399,7 @@ async def download_url(url: str, filename: str, progress_msg, start_time_ref: li
             )
         except Exception:
             pass
-        return await download_ytdlp(url, filename, progress_msg, start_time_ref)
+        return await download_ytdlp(url, filename, progress_msg, start_time_ref, quality=quality)
 
     # ── Probe the URL to detect content type ─────────────────────────────────
     async with aiohttp.ClientSession(headers=headers) as probe_session:
