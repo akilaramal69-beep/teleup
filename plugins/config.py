@@ -64,9 +64,12 @@ class Config:
     MAX_FILE_SIZE: int = 2_097_152_000          # ~2 GB (Pyrogram MTProto limit)
     CHUNK_SIZE: int = int(os.environ.get("CHUNK_SIZE", 512)) * 1024  # KB → bytes
 
-    # ── yt-dlp cookies ────────────────────────────────
+    # ── yt-dlp cookies & tokens ───────────────────────
     # Decoded once at import time; reused for every yt-dlp call
     YT_COOKIES_FILE: str | None = _resolve_cookies()
+    # Proof-of-Origin token for YouTube (bypasses server-IP bot detection)
+    # Generate via: https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide
+    YT_POTOKEN: str = os.environ.get("YT_POTOKEN", "").strip()
 
     # ── Misc ──────────────────────────────────────────
     LOGGER = logging
